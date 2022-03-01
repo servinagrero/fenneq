@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import inspect
 import json
 import sys
 from datetime import datetime
+from typing import Any, Callable
 
 import pika
 from pika.channel import Channel
@@ -11,12 +13,26 @@ from pika.channel import Channel
 class Listener:
     """Class to manage the communication from rabbitmq.
 
-    Attributes:
-        node_name: RabbitMQ routing key to listen to messages
-        config: Dictionary containing internal configuration
+    :param url: URL to connect to RabbitMQ
+    :type url: str
+
+    :param exchange_name: RabbitMQ exchange to listen to commands
+    :type exchange_name: str
+
+    :param node_name: RabbitMQ routing key to listen to messages
+    :type node_name: str
+
+    :param queue_commands:
+    :type queue_commands:
+
+    :param handlers:
+    :type handles:
+
+    :param middleware:
+    :type middleware: list[Callable]
     """
 
-    def __init__(self, url, exchange_name, node_name: str):
+    def __init__(self, url: str, exchange_name: str, node_name: str):
         self.url = url
         self.node_name = node_name
         self.exchange_name = exchange_name
@@ -24,15 +40,10 @@ class Listener:
         self.handlers = []
         self.middleware = []
 
+        self.__setup_broker()
+
     def __setup_broker(self):
-        """Setup RabbitMQ to listen to messages.
-
-        Args:
-            None
-
-        Returns:
-            None
-        """
+        """Setup RabbitMQ to listen to messages."""
         params = pika.URLParameters(self.url)
         self.con = pika.BlockingConnection(params)
         self.channel = self.con.channel()
@@ -50,12 +61,18 @@ class Listener:
             routing_key=self.node_name,
         )
 
-    def on(self, handle: str, **options):
-        """Register a function on a handle
+    def on(self, handle: Any, **options: Dict):
+        """Register a function on a handle.
+
+        :param handle:
+        :type handle:
+
+        :param options:
+        :type options:
 
         The same function can be added to multiple dispatchers and to different handlers.
 
-        Example:
+        .. code-block:: python
 
             @app2.on("foo")
             @app.on({"foo": "bar"})
@@ -63,16 +80,11 @@ class Listener:
             def hello()
                 return "hello world"
 
-        Args:
-            handle: Pattern to match from the message received.
+        :return: None
 
-        Returns:
-            None
-
-        Todo:
+        :todo:
             * Check that the sigature of the handler is correct.
             * Proper pattern matching on handle. Allow to put a schema.
-            * Handle one_shot. After being called once, it will not be able to call it again.
         """
 
         def decorator(callback, *args, **kwargs):
@@ -81,49 +93,64 @@ class Listener:
 
         return decorator
 
-    def use_middleware(self, middleware):
+    def use_middleware(self, middleware: Callable):
         """Add a middleware to the dispatcher.
 
-        Args:
-            middleware: Function to act as middleware.
+        :param middleware: Function to act as middleware.
+        :type middleware: Callable
 
-        Returns:
-            None
+        :return: None
 
-        Todo:
+        :todo:
             * Check that the sigature of the middleware is correct
         """
-        self.middleware.append(middleware)
+        sig = inspect.signature(middleware)
+        if len(sig.parameters) < 4:
+            print(f"Middleware {middleware.__name__} should have 4 arguments.")
+        else:
+            self.middleware.append(middleware)
 
-    def __match(self, handler, msg):
+    def __match(self, handler: Any, msg: Any):
         """Match a handler to the message received.
 
-        Args:
-            handler: Handler to match against.
-            msg: Message from RabbitMQ after all the middleware.
-        Returns:
-            True if the pattern matches
+        :param handler: Handler to match against.
+        :type handler: Any
+
+        :param msg: Message from RabbitMQ after all the middleware.
+        :type msg: Any
+
+        :return: True if the pattern matches
+        :rtype: bool
         """
-        if not type(handler) is type(msg):
-            return False
-        if isinstance(handler, dict):
-            return all(handler[key] == msg.get(key, None) for key in handler)
+        if handler is True:
+            return True
         if isinstance(handler, str):
             return handler in msg
-        if isinstance(handler, bool):
-            return handler
+        if isinstance(handler, type):
+            return isinstance(msg, handler)
+        if isinstance(handler, dict):
+            return all(
+                handler[key] == msg.get(key, None)
+                or isinstance(msg.get(key, None), handler[key])
+                for key in handler
+            )
 
     def handle_message(self, channel: Channel, method_frame, props, body):
         """Dispatch the correct route when a message is received.
 
-        Args:
-            channel:
-            method_frame:
-            props:
-            body:
+        :param channel:
+        :type channel: pika.channel.Channel
 
-        Returns:
-            None
+        :param method_frame:
+        :type method_frame:
+
+        :param props:
+        :type props:
+
+        :param body: message received from rabbitmq
+        :type body: bytes
+
+        :return: None
         """
         try:
             for middleware in self.middleware:
@@ -143,22 +170,32 @@ class Listener:
         finally:
             return None
 
+    def send(self, msg: bytes):
+        """Send a message to the running agent.
+
+        .. code-block:: python
+
+            app.send(json.dumps({"message": "Hello there"}))
+
+        """
+        self.channel.basic_publish(
+            exchange=self.exchange_name, routing_key=self.node_name, body=msg
+        )
+
     def run(self):
         """
-        Listen to messages and dispatch operators.
+        Listen to messages and dispatch handlers.
 
-        Args:
-            None
-
-        Todo:
+        :todo:
             * Handle restarting the app in a loop.
         """
-        self.__setup_broker()
-
-        self.channel.basic_consume(
-            queue=self.queue_commands,
-            on_message_callback=self.handle_message,
-            auto_ack=True,
-        )
-        self.channel.start_consuming()
-        self.con.close()
+        try:
+            self.channel.basic_consume(
+                queue=self.queue_commands,
+                on_message_callback=self.handle_message,
+                auto_ack=True,
+            )
+            self.channel.start_consuming()
+        except Exception as e:
+            print(e)
+            self.con.close()
