@@ -1,11 +1,19 @@
 [tool.poetry]
-name = "fennec"
+name = "fenneq"
 version = "0.1.0"
-description = ""
-authors = ["Sergio Vinagrero <servinagrero@gmail.com>"]
+description = "Framework to create agents based on RabbitMQ"
+authors = ["Sergio Vinagrero Gutierrez <servinagrero@gmail.com>"]
+keywords = ['rabbitmq', 'agent']
+readme = "README.md"
+license = "MIT"
+homepage = "https://github.com/servinagrero/fenneq"
+repository = "https://github.com/servinagrero/fenneq"
+include = [
+    "LICENSE",
+]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.8"
 pika = "^1.2.0"
 
 [tool.poetry.dev-dependencies]

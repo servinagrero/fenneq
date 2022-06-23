@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 
-import sys
 import inspect
-from typing import Any, Callable, Dict
+import json
+from enum import Enum
+from typing import Any, Callable, Dict, Union
 
 import pika
 from pika.channel import Channel
 
 
-def match(handler: Any, msg: Any):
+def match_handler(handler: Any, msg: Any):
     """Match a handler to the message received.
 
-    :param handler: Handler to match against.
-    :type handler: Any
+    Args:
+        handler: Handler to match against.
+        msg: Message from RabbitMQ after all the middleware.
 
-    :param msg: Message from RabbitMQ after all the middleware.
-    :type msg: Any
-
-    :return: True if the pattern matches
-    :rtype: bool
+    Returns:
+        True if the pattern matches
     """
     if handler is True:
         return True
@@ -35,35 +34,34 @@ def match(handler: Any, msg: Any):
     return False
 
 
-class Listener:
+class MsgType(Enum):
+    #: Raw bytes
+    RAW = "RAW"
+    #: JSON string
+    JSON = "JSON"
+
+
+class Agent:
     """Class to manage the communication from rabbitmq.
 
-    :param url: URL to connect to RabbitMQ
-    :type url: str
-
-    :param exchange_name: RabbitMQ exchange to listen to commands
-    :type exchange_name: str
-
-    :param node_name: RabbitMQ routing key to listen to messages
-    :type node_name: str
-
-    :param queue_commands:
-    :type queue_commands:
-
-    :param handlers:
-    :type handles:
-
-    :param middleware:
-    :type middleware: list[Callable]
+    Attributes:
+        url: URL to connect to RabbitMQ
+        exchange_name: RabbitMQ exchange to listen to commands
+        node_name: RabbitMQ routing key to listen to messages
+        queue_commands: Internal queue to send and received commands.
+        handlers: List of handlers and their functions to execute.
+        middleware: List of middleware to execute when a message is received.
+        msg_type: Whether to send the message as bytes or in JSON
     """
 
-    def __init__(self, url: str, exchange_name: str, node_name: str):
+    def __init__(self, url: str, exchange_name: str, node_name: str, msg_type: MsgType):
         self.url = url
         self.node_name = node_name
         self.exchange_name = exchange_name
         self.queue_commands = None
         self.handlers = []
         self.middleware = []
+        self.msg_type = msg_type
 
         self.__setup_broker()
 
@@ -89,11 +87,12 @@ class Listener:
     def on(self, handle: Any, **options: Dict):
         """Register a function on a handle.
 
-        :param handle:
-        :type handle:
+        Args:
+            handle: Handler to match the message to.
+            options: Additional options for the handler
 
-        :param options:
-        :type options:
+        Returns:
+            None
 
         The same function can be added to multiple dispatchers and to different handlers.
 
@@ -105,9 +104,8 @@ class Listener:
             def hello()
                 return "hello world"
 
-        :return: None
-
         .. todo::
+
             * Check that the sigature of the handler is correct.
             * Proper pattern matching on handle. Allow to put a schema.
         """
@@ -121,13 +119,11 @@ class Listener:
     def use_middleware(self, middleware: Callable):
         """Add a middleware to the dispatcher.
 
-        :param middleware: Function to act as middleware.
-        :type middleware: Callable
+        Args:
+            middleware: Function to act as middleware.
 
-        :return: None
-
-        .. todo::
-            * Check that the sigature of the middleware is correct
+        Returns:
+            None
         """
         sig = inspect.signature(middleware)
         if len(sig.parameters) < 4:
@@ -138,19 +134,14 @@ class Listener:
     def handle_message(self, channel: Channel, method_frame, props, body):
         """Dispatch the correct route when a message is received.
 
-        :param channel:
-        :type channel: pika.channel.Channel
+        Args:
+            channel: Channel the message was received from.
+            method_frame: Method used to pass the message.
+            props: Properties of the message.
+            body: Message received from rabbitmq.
 
-        :param method_frame:
-        :type method_frame:
-
-        :param props:
-        :type props:
-
-        :param body: message received from rabbitmq
-        :type body: bytes
-
-        :return: None
+        Returns:
+            None
         """
         try:
             for middleware in self.middleware:
@@ -158,27 +149,36 @@ class Listener:
                     channel, method_frame, props, body
                 )
 
+            if self.msg_type == MsgType.JSON:
+                msg_body = json.loads(body)
+            else:
+                msg_body = body
+
             for name, handler_fn, options in self.handlers:
-                if match(name, body):
-                    handler_fn(channel, method_frame, props, body)
+                if match_handler(name, msg_body):
+                    handler_fn(channel, method_frame, props, msg_body)
                     if options.get("one_shot", False):
                         self.handlers.remove((name, handler_fn, options))
 
         except Exception as excep:
             print(f"Exception while handling message: {excep}")
 
-    def send(self, msg: bytes):
+    def send(self, msg: Union[Dict, str, bytes]):
         """Send a message to the running agent.
 
-        :param msg: message to be sent to the agent.
-        :type msg: bytes
-        
+        Args:
+            msg: message to be sent to the agent.
+
+        Returns:
+            None
+
         .. code-block:: python
 
             app.send(json.dumps({"message": "Hello there"}))
-
-        :return: None
         """
+        if self.msg_type == MsgType.JSON:
+            msg = json.dumps(msg).encode("utf-8")
+
         self.channel.basic_publish(
             exchange=self.exchange_name, routing_key=self.node_name, body=msg
         )
@@ -187,10 +187,14 @@ class Listener:
         """
         Listen to messages and dispatch handlers.
 
-        :raise RuntimeError: No handlers have been attached to the agent.
-        
-        :return: None
+        Raises:
+            RuntimeError: No handlers have been attached to the agent.
+
+        Returns:
+            None
+
         .. todo::
+
             * Handle restarting the app in a loop.
         """
         if not self.handlers:
@@ -208,5 +212,5 @@ class Listener:
             print("CTRL-C pressed. Exiting")
             self.con.close()
         except Exception as excep:
-            print(excep)
+            print(f"Exception at runtime: {excep}")
             self.con.close()

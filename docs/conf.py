@@ -12,12 +12,14 @@
 #
 import os
 import sys
-sys.path.insert(0, os.path.abspath('..'))
+from pathlib import Path
+sys.path.insert(0, Path(__file__).parents[1].resolve().as_posix())
 
+print(sys.path)
 
 # -- Project information -----------------------------------------------------
 
-project = 'Fennec'
+project = 'Fenneq'
 copyright = '2022, Sergio Vinagrero Gutierrez'
 author = 'Sergio Vinagrero Gutierrez'
 
@@ -50,9 +52,33 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = 'bizstyle'
+html_theme = "pydata_sphinx_theme"
+
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ['_static']
+html_logo = "logo.svg"
+
+html_theme_options = {
+    "show_nav_level": 4,
+    "navigation_depth": 6,
+    "icon_links": [
+        {
+            "name": "GitHub",
+            "url": "https://github.com/servinagrero/fenneq.git",
+            "icon": "fab fa-github-square",
+            "type": "fontawesome",
+        }
+    ],
+}
+pygments_style = "sas"
+
+
+# Automatically extract typehints when specified and place them in
+# descriptions of the relevant function/method.
+autodoc_typehints = "description"
+
+# Don't show class signature with the class' name.
+autodoc_class_signature = "separated"
