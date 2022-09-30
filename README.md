@@ -1,5 +1,5 @@
 <div align='center'>
-<img src="./docs/logo.svg" width="300px">
+<img src="./docs/logo.png" width="300px">
 <h3>Framework to create agents based on RabbitMQ.</h3>
 </div>
 
