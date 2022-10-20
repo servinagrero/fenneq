@@ -1,31 +1,60 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import inspect
 import json
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, Union
+from functools import wraps
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
-import pika
-from pika.channel import Channel
+from pika import BlockingConnection, URLParameters
 
 
-def match_handler(handler: Any, msg: Any):
-    """Match a handler to the message received.
+@dataclass
+class Message:
+    """Wrapper for a message received from RabbitMQ.
+
+    Attributes:
+        channel: Channel the message was received from.
+        method: Method used to pass the message.
+        props: Properties of the message.
+        body: Message received from RabbitMQ.
+    """
+
+    channel: Any
+    method: Any
+    props: Any
+    body: Any
+
+
+# Callback function
+Callback = Callable[[Message], None]
+
+# Middleware to be executed before a function handler.
+Middleware = Callable[[Message], Message]
+
+
+def match_handler(handler: Any, msg: Any) -> bool:
+    """Check if a message matches a user defined pattern.
+
+    The matching is done with strict equality. This means that if msg is a dict, handler needs to have the same keys and same types for the values.
 
     Args:
         handler: Handler to match against.
         msg: Message from RabbitMQ after all the middleware.
 
     Returns:
-        True if the pattern matches
+        True if the pattern matches,
     """
     if handler is True:
         return True
-    if isinstance(handler, str):
-        return handler in msg
-    if isinstance(handler, type):
+    elif isinstance(handler, str):
+        return handler == msg
+    elif isinstance(handler, type):
         return isinstance(msg, handler)
-    if isinstance(handler, dict):
+    elif isinstance(handler, dict):
         return all(
             handler[key] == msg.get(key, None)
             or isinstance(msg.get(key, None), handler[key])
@@ -34,154 +63,200 @@ def match_handler(handler: Any, msg: Any):
     return False
 
 
-class MsgType(Enum):
-    #: Raw bytes
-    RAW = "RAW"
-    #: JSON string
-    JSON = "JSON"
+class BasicAgent:
+    """Class for a basic agent.
 
+    This class implements the basic functionality to connect to RabbitMQ.
+    Subclasses should add the functionality to read or send messages.
 
-class Agent:
-    """Class to manage the communication from rabbitmq.
+    Args:
+        url: URL to connect to RabbitMQ.
+        name: Name of the Agent. Serves as routing key.
+        exchange: Exchange name for RabbitMQ.
 
     Attributes:
-        url: URL to connect to RabbitMQ
-        exchange_name: RabbitMQ exchange to listen to commands
-        node_name: RabbitMQ routing key to listen to messages
-        queue_commands: Internal queue to send and received commands.
-        handlers: List of handlers and their functions to execute.
-        middleware: List of middleware to execute when a message is received.
-        msg_type: Whether to send the message as bytes or in JSON
+        connection: Connection to RabbitMQ.
+        channel: Connection channel.
+        name: Name of the agent. Serves as routing key.
+        exchange: RabbitMQ exchange name.
     """
 
-    def __init__(self, url: str, exchange_name: str, node_name: str, msg_type: MsgType):
-        self.url = url
-        self.node_name = node_name
-        self.exchange_name = exchange_name
-        self.queue_commands = None
-        self.handlers = []
-        self.middleware = []
-        self.msg_type = msg_type
+    def __init__(self, url: str, name: str, exchange: str):
+        parameters = URLParameters(url)
+        self.connection = BlockingConnection(parameters)
+        self.channel = self.connection.channel()
+        self.name = name
+        self.exchange = exchange
 
-        self.__setup_broker()
+        self.declare_exchange()
 
-    def __setup_broker(self):
-        """Setup RabbitMQ to listen to messages."""
-        params = pika.URLParameters(self.url)
-        self.con = pika.BlockingConnection(params)
-        self.channel = self.con.channel()
+    def declare_queue(self, queue_name: str = ""):
+        """Declare a RabbitMQ queue.
+        Args:
+            queue_name: Name of the queue. Defaults to ''.
+        """
+        return self.channel.queue_declare(queue=queue_name, exclusive=True)
+
+    def declare_exchange(self):
+        """Declare a RabbitMQ exchange."""
         self.channel.exchange_declare(
-            exchange=self.exchange_name,
+            exchange=self.exchange,
             exchange_type="topic",
             durable=False,
         )
-        result = self.channel.queue_declare(queue="", exclusive=True)
-        self.queue_commands = result.method.queue
 
-        self.channel.queue_bind(
-            exchange=self.exchange_name,
-            queue=self.queue_commands,
-            routing_key=self.node_name,
+    def send(
+        self,
+        msg: Union[Dict, str, bytes],
+        to: Optional[str] = None,
+        at: Optional[str] = None,
+    ):
+        """Send a message to an agent.
+
+        Args:
+            msg: message to be sent to the agent.
+            to: Node name to send the message. Defaults to the assigned name.
+            at: Exchange name to send the message. Defaults to the assigned exchange.
+
+        Example:
+            >>> agent.send("Hello there")
+            >>> agent.send(b'Message in bytes')
+            >>> agent.send({"message": 42})
+            >>> agent.send({"message": 42}, to="another.agent", at="another_exchange")
+        """
+        body = json.dumps(msg).encode("utf-8")
+        routing_key = to or self.name
+        exchange = at or self.exchange
+
+        if routing_key is None:
+            raise ValueError("Name cannot be None when sending a message")
+
+        if exchange is None:
+            raise ValueError("Exchange cannot be None when sending a message")
+
+        self.channel.basic_publish(
+            exchange=exchange, routing_key=routing_key, body=body
         )
 
-    def on(self, handle: Any, **options: Dict):
+    def close(self):
+        """Close the channel and connection"""
+        self.channel.close()
+        self.connection.close()
+
+
+class Agent(BasicAgent):
+    """Class to manage the communication from rabbitmq.
+
+    Attributes:
+        queue_commands: Internal queue to send and received commands.
+        handlers: List of handlers and their functions to execute.
+        middleware: List of middleware to execute right when a message is received.
+    """
+
+    def __init__(self, url: str, name: str, exchange: str):
+        super(Agent, self).__init__(url, name, exchange)
+        self.queue_commands = None
+        self.handlers: List[Tuple[Any, Callback, Dict[str, bool]]] = []
+        self.middleware: List[Middleware] = []
+
+        self.declare_exchange()
+
+        result = self.declare_queue()
+        self.queue_commands = result.method.queue
+        self.channel.queue_bind(
+            exchange=self.exchange,
+            queue=self.queue_commands,
+            routing_key=self.name,
+        )
+
+    def on(self, handle: Any, **options):
         """Register a function on a handle.
 
         Args:
-            handle: Handler to match the message to.
+            handle: Handler to check against the received message.
             options: Additional options for the handler
-
-        Returns:
-            None
 
         The same function can be added to multiple dispatchers and to different handlers.
 
-        .. code-block:: python
+        The following options are allowed:
+        * oneshot: The handler only works once. Once the function is dispatched the handler is removed.
 
-            @app2.on("foo")
-            @app.on({"foo": "bar"})
-            @app.on("baz")
-            def hello()
-                return "hello world"
+        Example:
+            >>> @agent.on("baz", "oneshot")
+            >>> @agent.on({"foo": "bar"})
+            >>> @agent2.on("foo")
+            >>> def hello()
+            >>>     return "hello world"
 
-        .. todo::
-
-            * Check that the sigature of the handler is correct.
+        Todo:
             * Proper pattern matching on handle. Allow to put a schema.
         """
 
         def decorator(callback):
-            self.handlers.append((handle, callback, options))
-            return callback
+            if len(inspect.signature(callback).parameters) != 1:
+                raise ValueError(
+                    f'Callback "{callback.__name__}" needs to have only one parameter'
+                )
+
+            @wraps(callback)
+            def wrapper():
+                self.handlers.append((handle, callback, options))
+                return callback
+
+            wrapper()
 
         return decorator
 
-    def use_middleware(self, middleware: Callable):
+    def with_middleware(self, middleware):
         """Add a middleware to the dispatcher.
+
+        A middleware receives a Message and returns a Message.
+        If None is returned, no more middlewares are evaluated.
 
         Args:
             middleware: Function to act as middleware.
-
-        Returns:
-            None
         """
         sig = inspect.signature(middleware)
-        if len(sig.parameters) < 4:
-            print(f"Middleware {middleware.__name__} should have 4 arguments.")
+        if len(sig.parameters) != 1:
+            print(f"Middleware {middleware.__name__} needs only one parameter.")
         else:
             self.middleware.append(middleware)
 
-    def handle_message(self, channel: Channel, method_frame, props, body):
-        """Dispatch the correct route when a message is received.
+    def handle_message(self, channel, method_frame, props, body: bytes):
+        """Dispatch a callback function when a message is received.
+
+        Options:
+        - one_shot: The callback is removed from the list after being executed.
+        - break: Do not check for more handlers, even if they can match.
 
         Args:
             channel: Channel the message was received from.
             method_frame: Method used to pass the message.
             props: Properties of the message.
-            body: Message received from rabbitmq.
-
-        Returns:
-            None
+            body: Message received from RabbitMQ.
         """
+        msg_body = json.loads(body)
+        message = Message(channel, method_frame, props, msg_body)
+
         try:
             for middleware in self.middleware:
-                channel, method_frame, props, body = middleware(
-                    channel, method_frame, props, body
-                )
-
-            if self.msg_type == MsgType.JSON:
-                msg_body = json.loads(body)
-            else:
-                msg_body = body
+                res = middleware(message)
+                if res is None:
+                    break
+                else:
+                    message = res
 
             for name, handler_fn, options in self.handlers:
                 if match_handler(name, msg_body):
-                    handler_fn(channel, method_frame, props, msg_body)
+
+                    handler_fn(message)
                     if options.get("one_shot", False):
                         self.handlers.remove((name, handler_fn, options))
+                    if options.get("block", False):
+                        break
 
         except Exception as excep:
             print(f"Exception while handling message: {excep}")
-
-    def send(self, msg: Union[Dict, str, bytes]):
-        """Send a message to the running agent.
-
-        Args:
-            msg: message to be sent to the agent.
-
-        Returns:
-            None
-
-        .. code-block:: python
-
-            app.send(json.dumps({"message": "Hello there"}))
-        """
-        if self.msg_type == MsgType.JSON:
-            msg = json.dumps(msg).encode("utf-8")
-
-        self.channel.basic_publish(
-            exchange=self.exchange_name, routing_key=self.node_name, body=msg
-        )
 
     def run(self):
         """
@@ -190,11 +265,7 @@ class Agent:
         Raises:
             RuntimeError: No handlers have been attached to the agent.
 
-        Returns:
-            None
-
-        .. todo::
-
+        Todo:
             * Handle restarting the app in a loop.
         """
         if not self.handlers:
@@ -210,7 +281,16 @@ class Agent:
 
         except KeyboardInterrupt:
             print("CTRL-C pressed. Exiting")
-            self.con.close()
+            self.close()
         except Exception as excep:
             print(f"Exception at runtime: {excep}")
-            self.con.close()
+            self.close()
+
+
+class Sender(BasicAgent):
+    """Agent used to send messages."""
+
+    def __init__(
+        self, url: str, name: Optional[str] = None, exchange: Optional[str] = None
+    ):
+        super(Sender, self).__init__(url, name, exchange)

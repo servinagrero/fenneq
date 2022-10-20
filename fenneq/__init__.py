@@ -1,3 +1,3 @@
-__version__ = "0.1.0"
+#!/usr/bin/env python3
 
-from .agent import Agent, MsgType, match_handler
+from .agent import BasicAgent, Agent, Message, Sender, match_handler
