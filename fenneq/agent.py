@@ -36,7 +36,7 @@ Callback = Callable[[Message], None]
 Middleware = Callable[[Message], Message]
 
 
-def match_handler(handler: Any, msg: Any) -> bool:
+def match_handler(handler: Any, msg: Any, strict: bool = True) -> bool:
     """Check if a message matches a user defined pattern.
 
     The matching is done with strict equality. This means that if msg is a dict, handler needs to have the same keys and same types for the values.
@@ -55,7 +55,8 @@ def match_handler(handler: Any, msg: Any) -> bool:
     elif isinstance(handler, type):
         return isinstance(msg, handler)
     elif isinstance(handler, dict):
-        return all(
+        check_fn = all if strict else any
+        return check_fn(
             handler[key] == msg.get(key, None)
             or isinstance(msg.get(key, None), handler[key])
             for key in handler
@@ -222,21 +223,19 @@ class Agent(BasicAgent):
         else:
             self.middleware.append(middleware)
 
-    def handle_message(self, channel, method_frame, props, body: bytes):
-        """Dispatch a callback function when a message is received.
+    def get_message(self) -> Optional[Message]:
+        method, props, body = self.channel.basic_get("")
+        if method:
+            return Message(self.channel, method, props, body)
+        else:
+            return None
 
+    def handle_message(self, message: Message):
+        """
         Options:
         - one_shot: The callback is removed from the list after being executed.
-        - break: Do not check for more handlers, even if they can match.
-
-        Args:
-            channel: Channel the message was received from.
-            method_frame: Method used to pass the message.
-            props: Properties of the message.
-            body: Message received from RabbitMQ.
+        - block: Do not check for more handlers, even if they can match.
         """
-        msg_body = json.loads(body)
-        message = Message(channel, method_frame, props, msg_body)
 
         try:
             for middleware in self.middleware:
@@ -247,16 +246,27 @@ class Agent(BasicAgent):
                     message = res
 
             for name, handler_fn, options in self.handlers:
-                if match_handler(name, msg_body):
-
+                if match_handler(name, message.body, options.get("strict", True)):
                     handler_fn(message)
                     if options.get("one_shot", False):
                         self.handlers.remove((name, handler_fn, options))
                     if options.get("block", False):
                         break
-
         except Exception as excep:
             print(f"Exception while handling message: {excep}")
+
+    def message_callback(self, channel, method_frame, props, body: bytes):
+        """Dispatch a callback function when a message is received.
+
+        Args:
+            channel: Channel the message was received from.
+            method_frame: Method used to pass the message.
+            props: Properties of the message.
+            body: Message received from RabbitMQ.
+        """
+        msg_body = json.loads(body)
+        message = Message(channel, method_frame, props, msg_body)
+        self.handle_message(message)
 
     def run(self):
         """
@@ -274,7 +284,7 @@ class Agent(BasicAgent):
         try:
             self.channel.basic_consume(
                 queue=self.queue_commands,
-                on_message_callback=self.handle_message,
+                on_message_callback=self.message_callback,
                 auto_ack=True,
             )
             self.channel.start_consuming()
