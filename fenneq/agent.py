@@ -5,12 +5,11 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import dataclass
-from enum import Enum
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import sys
 
 from pika import BlockingConnection, URLParameters
-
 
 @dataclass
 class Message:
@@ -50,17 +49,22 @@ def match_handler(handler: Any, msg: Any, strict: bool = True) -> bool:
     """
     if handler is True:
         return True
-    elif isinstance(handler, str):
-        return handler == msg
-    elif isinstance(handler, type):
+    
+    if isinstance(handler, type):
         return isinstance(msg, handler)
-    elif isinstance(handler, dict):
-        check_fn = all if strict else any
-        return check_fn(
-            handler[key] == msg.get(key, None)
-            or isinstance(msg.get(key, None), handler[key])
-            for key in handler
-        )
+
+    if isinstance(handler, str) and isinstance(msg, str):
+        return handler == msg
+
+    if isinstance(handler, dict) and isinstance(msg, dict):
+        if strict:
+            keys_check = handler.keys() == msg.keys()
+            if keys_check is False:
+                return False
+            return all(match_handler(h, v) for h,v in zip(handler.values(), msg.values()))
+        
+        return any(match_handler(h, v) for h,v in zip(handler.values(), msg.values()))
+    
     return False
 
 
@@ -183,7 +187,7 @@ class Agent(BasicAgent):
         * oneshot: The handler only works once. Once the function is dispatched the handler is removed.
 
         Example:
-            >>> @agent.on("baz", "oneshot")
+            >>> @agent.on("baz", oneshot=True)
             >>> @agent.on({"foo": "bar"})
             >>> @agent2.on("foo")
             >>> def hello()
@@ -227,8 +231,7 @@ class Agent(BasicAgent):
         method, props, body = self.channel.basic_get("")
         if method:
             return Message(self.channel, method, props, body)
-        else:
-            return None
+        return None
 
     def handle_message(self, message: Message):
         """
@@ -241,9 +244,9 @@ class Agent(BasicAgent):
             for middleware in self.middleware:
                 res = middleware(message)
                 if res is None:
-                    break
-                else:
                     message = res
+                    break
+                message = res
 
             for name, handler_fn, options in self.handlers:
                 if match_handler(name, message.body, options.get("strict", True)):
@@ -301,6 +304,6 @@ class Sender(BasicAgent):
     """Agent used to send messages."""
 
     def __init__(
-        self, url: str, name: Optional[str] = None, exchange: Optional[str] = None
+        self, url: str, name: str = "", exchange: str = ""
     ):
         super(Sender, self).__init__(url, name, exchange)

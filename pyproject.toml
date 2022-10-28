@@ -3,14 +3,15 @@ name = "fenneq"
 version = "0.1.0"
 description = "Framework to create agents based on RabbitMQ"
 authors = ["Sergio Vinagrero Gutierrez <servinagrero@gmail.com>"]
-keywords = ['rabbitmq', 'agent']
+keywords = ['rabbitmq', 'agent', 'automation']
 readme = "README.md"
 license = "MIT"
-homepage = "https://github.com/servinagrero/fenneq"
+homepage = "https://servinagrero.github.io/fenneq"
 repository = "https://github.com/servinagrero/fenneq"
 include = [
     "LICENSE",
 ]
+packages = [{include = "fenneq"}]
 
 [tool.poetry.dependencies]
 python = "^3.8"
