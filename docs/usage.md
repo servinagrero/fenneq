@@ -1,23 +1,25 @@
-# Usage guide
+# Agents
+
+Agents are the main feature of fenneq. They allow listening for messages on a RabbitMQ exchange and react to those messages based on some filters.
+
+To know more about RabbitMQ, please look at the [official documentation]()
 
 ## Creating an agent
 
 In order to create an agent the following parameters need to be provided.
 
-- `url`: String formatted with user and password.
-- `node`: RabbitMQ topic to bind the agent
-- `exchange`: RabbitMQ exchange to listen to messages
-- `msg_type`: Whether the message should be parsed to JSON or bytes.
+- `url`: Connection parameters for RabbitMQ.
+- `name`: Name of the RabbitMQ. RabbitMQ topic to bind the agent
+- `exchange`: RabbitMQ exchange to listen to messages.
 
 
 ```{.py3 title="Creation of an agent"}
 from fenneq import Agent
 
 url = "amqp://user:pass@localhost"
-node = "agent.test"
-exchange = "Name of RabbitMQ exchange"
-msg_type = Agent.JSON
-agent = Agent(url, exchange, node)
+name = "agent.test"
+exchange = "msg_exchange"
+agent = Agent(url, name, exchange)
 ```
 
 ## Registering a callback
@@ -72,4 +74,25 @@ agent.run()
 agent = Agent(...)
 msg = {"msg": "Hello world!"}
 agent.send(msg)
+```
+
+## Sender
+
+A sender agent is used just to send messages. A Sender agent requires the url to connect to RabbitMQ. The ``name`` and ``exchange`` argumens are optional as they can be provided later in the ``send()`` method.
+
+```{.py3 title="Creating a Sender"}
+from fenneq import Agent, Sender
+
+agent = Sender(url)
+msg = {"msg": "Hello world!"}
+agent.send(msg, to="other.agent", at="exchange")
+```
+
+When calling ``send()`` if either name or exchange are not defined, a *ValueError is raised.
+
+```{.py3}
+agent = Sender(url, exchange="exchange")
+msg = {"msg": "Hello world!"}
+agent.send(msg, at="exchange")
+# ValueError is Raised as the name is not provided
 ```
